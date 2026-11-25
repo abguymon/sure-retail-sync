@@ -41,15 +41,17 @@ class JevCategorizer(Categorizer):
         model: str = "jev-latest",
         fallback_category: str = "Shopping",
         min_confidence: float = 0.5,
+        category_hints: dict[str, str] | None = None,
     ):
         self.api_key = api_key
         self.endpoint = endpoint
         self.model = model
         self.fallback_category = fallback_category
         self.min_confidence = min_confidence
+        self.category_hints = category_hints or {}
 
     def categorize(self, store: str, items: list[dict], categories: dict[str, str]) -> list[str | None]:
-        criteria = {name: None for name in categories}
+        criteria = {name: self.category_hints.get(name) for name in categories}
         criteria[UNSURE] = "No listed category is a reasonable fit"
         questions = {
             f"item_{i}": {
@@ -96,20 +98,25 @@ class OpenAICompatibleCategorizer(Categorizer):
         base_url: str = "https://api.openai.com/v1",
         model: str = "gpt-4o-mini",
         fallback_category: str = "Shopping",
+        category_hints: dict[str, str] | None = None,
     ):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.fallback_category = fallback_category
+        self.category_hints = category_hints or {}
 
     def categorize(self, store: str, items: list[dict], categories: dict[str, str]) -> list[str | None]:
-        cat_list = sorted(categories.keys())
+        cat_desc = [
+            f"{name}: {self.category_hints[name]}" if name in self.category_hints else name
+            for name in sorted(categories.keys())
+        ]
         prompt = (
             f"Classify each {store} purchase item into exactly one category from this list:\n"
-            f"{json.dumps(cat_list)}\n\n"
+            f"{json.dumps(cat_desc)}\n\n"
             f"Items:\n"
             f"{json.dumps([{'index': i, 'title': it['title'], 'price': it['price']} for i, it in enumerate(items)])}\n\n"
-            'Return ONLY valid JSON: {"categories": ["<category for index 0>", ...]} '
+            'Return ONLY valid JSON: {"categories": ["<exact category name for index 0>", ...]} '
             "with the exact same length as the items array."
         )
         headers = {"Content-Type": "application/json"}
@@ -141,10 +148,24 @@ class OpenAICompatibleCategorizer(Categorizer):
         return out
 
 
+def _parse_category_hints() -> dict[str, str]:
+    raw = os.environ.get("CATEGORY_HINTS", "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return {str(k): str(v) for k, v in parsed.items() if str(v).strip()}
+    except json.JSONDecodeError as exc:
+        log.warning("Invalid CATEGORY_HINTS JSON (ignoring): %s", exc)
+    return {}
+
+
 def build_categorizer() -> Categorizer:
     provider = os.environ.get("CATEGORIZER", "").strip().lower()
     fallback = os.environ.get("FALLBACK_CATEGORY", "Shopping")
     min_conf = float(os.environ.get("MIN_CONFIDENCE", "0.5"))
+    hints = _parse_category_hints()
 
     # Auto-detect if CATEGORIZER is omitted
     if not provider:
@@ -166,6 +187,7 @@ def build_categorizer() -> Categorizer:
             model=os.environ.get("JEV_MODEL", "jev-latest"),
             fallback_category=fallback,
             min_confidence=min_conf,
+            category_hints=hints,
         )
 
     if provider == "openai":
@@ -174,6 +196,7 @@ def build_categorizer() -> Categorizer:
             base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
             model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
             fallback_category=fallback,
+            category_hints=hints,
         )
 
     return NullCategorizer()

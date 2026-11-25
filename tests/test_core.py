@@ -196,6 +196,39 @@ class CoreTests(unittest.TestCase):
             )
         self.assertEqual(set(cats.keys()), {"Shopping", "Fun Money", "Eating Out"})
 
+    def test_jev_categorizer_passes_category_hints(self):
+        from server.categorizer import JevCategorizer
+
+        cat = JevCategorizer(
+            api_key="test-key",
+            category_hints={"Fun Money": "Hobbies, crafts, treats"},
+        )
+        captured = {}
+
+        class FakeResp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"answers": {"item_0": {"choice": "Fun Money", "confidence": 0.92}}}
+
+        def fake_post(url, timeout, headers, json):
+            captured["payload"] = json
+            return FakeResp()
+
+        with patch("server.categorizer.requests.post", side_effect=fake_post):
+            res = cat.categorize(
+                "Amazon",
+                [{"title": "Bamboo Knitting Needles", "price": 12.52}],
+                {"Shopping": "1", "Fun Money": "2"},
+            )
+        self.assertEqual(res, ["Fun Money"])
+        self.assertEqual(
+            captured["payload"]["questions"]["item_0"]["criteria"]["Fun Money"],
+            "Hobbies, crafts, treats",
+        )
+        self.assertIsNone(captured["payload"]["questions"]["item_0"]["criteria"]["Shopping"])
+
     def test_http_auth_and_health(self):
         with tempfile.TemporaryDirectory() as tmp:
             handler = make_handler("super-secret-token", "http://127.0.0.1:1", "key", Path(tmp))
