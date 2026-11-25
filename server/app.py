@@ -326,6 +326,20 @@ def handle_amazon_sync(body: dict[str, Any], sure: SureClient, categorizer, data
     }
 
 
+def _describe_shape(obj: Any, depth: int = 0) -> Any:
+    if depth >= 4:
+        return type(obj).__name__
+    if isinstance(obj, dict):
+        return {k: _describe_shape(v, depth + 1) for k, v in list(obj.items())[:20]}
+    if isinstance(obj, list):
+        if not obj:
+            return "list(0)"
+        return [f"list({len(obj)})", _describe_shape(obj[0], depth + 1)]
+    if isinstance(obj, str):
+        return f"str({len(obj)}):{obj[:24]}" if len(obj) <= 32 else f"str({len(obj)})"
+    return f"{type(obj).__name__}:{obj}"
+
+
 def _extract_paypal_charges(body: dict[str, Any], days: int | None) -> tuple[list[dict[str, Any]], str | None]:
     charges: list[dict[str, Any]] = []
     next_token = None
@@ -333,7 +347,28 @@ def _extract_paypal_charges(body: dict[str, Any], days: int | None) -> tuple[lis
     for page in body.get("filter_pages") or []:
         parsed, next_token = parse_paypal_filter_response(page)
         if not parsed and isinstance(page, dict):
-            log.info("PayPal filter page parsed 0 items; top keys=%s", list(page.keys())[:10])
+            act = (page.get("data") or {}).get("data", {}).get("activity") if isinstance(page.get("data"), dict) else None
+            if isinstance(act, dict):
+                txs = act.get("transactions")
+                tx0 = txs[0] if isinstance(txs, list) and txs and isinstance(txs[0], dict) else {}
+                tx0_keys = list(tx0.keys())
+                # Show keys + any date/time/id/link/amount values from tx0 for quick schema diagnostics
+                tx0_interesting = {
+                    k: _describe_shape(v, depth=1)
+                    for k, v in tx0.items()
+                    if any(w in k.lower() for w in ("id", "date", "time", "link", "amount", "counterparty"))
+                }
+                log.info(
+                    "PayPal activity parsed 0/%s (noOfTransactions=%s, tx0_keys=%s, tx0_fields=%s)",
+                    len(txs) if isinstance(txs, list) else type(txs).__name__,
+                    act.get("noOfTransactions"),
+                    tx0_keys,
+                    json.dumps(tx0_interesting)[:1400],
+                )
+            else:
+                log.info("PayPal filter page parsed 0 items; shape=%s", json.dumps(_describe_shape(page))[:1500])
+        elif parsed:
+            log.info("PayPal filter page parsed %d items (next_token=%s)", len(parsed), bool(next_token))
         charges.extend(parsed)
 
     if body.get("charges"):

@@ -252,16 +252,41 @@ class CoreTests(unittest.TestCase):
                                 "timeCreated": "2026-11-12T18:00:00Z",
                                 "grossAmount": {"amount": "-0.99"},
                                 "itemTitle": "50GB iCloud+ Storage",
-                            }
+                            },
+                            {
+                                "id": "PP-TX-456",
+                                "displayName": "Steam Games",
+                                "date": {"formattedDate": "Nov 15", "year": "2026"},
+                                "amounts": {"net": {"formattedAmount": "-$19.99", "unformattedAmount": -19.99}},
+                                "isDebit": True,
+                            },
+                            {
+                                "linksInfo": {"detailsLink": "/myaccount/transactions/details/9XY87654AB123456C"},
+                                "counterpartyInfo": {"counterpartyName": "eBay Commerce Inc."},
+                                "amountInfo": {
+                                    "contents": {"amountText": "-$47.69"},
+                                    "classNames": {"transactionAmountClassName": "debit"},
+                                },
+                                "notesInfo": {"notes": '"Order Number : 05-15483"'},
+                                "descriptionInfo": {"content": {"transactionDescriptionText": "Payment"}},
+                                "dateInfo": {"content": {"transactionDateText": "Nov 18"}},
+                            },
                         ],
                     }
                 }
             }
         }
         parsed, next_tok = parse_paypal_filter_response(payload)
-        self.assertEqual(len(parsed), 1)
+        self.assertEqual(len(parsed), 3)
         self.assertEqual(next_tok, "tok-2")
         self.assertEqual(parsed[0]["cents"], -99)
+        self.assertEqual(parsed[1]["completed_date"], "2026-11-15")
+        self.assertEqual(parsed[1]["cents"], -1999)
+        self.assertEqual(parsed[2]["id"], "9XY87654AB123456C")
+        self.assertEqual(parsed[2]["merchant"], "eBay Commerce Inc.")
+        self.assertEqual(parsed[2]["cents"], -4769)
+        self.assertEqual(parsed[2]["completed_date"], "2026-11-18")
+        self.assertIn("Order Number : 05-15483", parsed[2]["description"])
         self.assertTrue(is_generic_paypal_name("PAYPAL PURCHASE"))
         self.assertTrue(is_generic_paypal_name("PayPal - PAYPAL PURCHASE"))
         self.assertFalse(is_generic_paypal_name("DAVIDsTEA - PAYPAL * DAVIDSTEA"))
@@ -293,6 +318,25 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(sure.updated[0][1]["name"], "Apple iCloud (PayPal)")
             self.assertEqual(sure.updated[0][1]["category_id"], "cat-sub")
             self.assertIn("[paypal] Apple iCloud", sure.updated[0][1]["notes"])
+
+        # Verify inline detail merge extracts itemDetails.itemList & fundingSourceList.last4 and skips "Purchase amount"
+        from server.paypal_parser import merge_paypal_detail
+        merged = merge_paypal_detail(
+            {"id": "8JY", "merchant": "DAVIDsTEA", "description": "", "payment_method_last_4": None},
+            {
+                "data": {
+                    "itemDetails": {
+                        "itemList": [
+                            {"name": "Purchase amount"},
+                            {"name": "Candy Cane Crush Tea"},
+                        ]
+                    },
+                    "fundingSource": {"fundingSourceList": [{"last4": "2510"}]},
+                }
+            },
+        )
+        self.assertEqual(merged["description"], "Candy Cane Crush Tea")
+        self.assertEqual(merged["payment_method_last_4"], "2510")
 
     def test_http_auth_and_health(self):
         with tempfile.TemporaryDirectory() as tmp:
