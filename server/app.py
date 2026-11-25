@@ -43,6 +43,17 @@ DATE_WINDOW_DAYS = int(os.environ.get("DATE_WINDOW_DAYS", str(DEFAULT_DATE_WINDO
 MIN_SPLIT_SHARE = float(os.environ.get("MIN_SPLIT_SHARE", str(DEFAULT_MIN_SPLIT_SHARE)))
 
 
+def _csv_env(name: str) -> set[str]:
+    return {item.strip() for item in os.environ.get(name, "").split(",") if item.strip()}
+
+
+def _load_spending_categories(sure: SureClient) -> dict[str, str]:
+    return sure.spending_categories(
+        exclude_names=_csv_env("EXCLUDE_CATEGORIES"),
+        include_parents=_csv_env("INCLUDE_PARENT_CATEGORIES"),
+    )
+
+
 def _load_state(data_dir: Path) -> dict[str, Any]:
     path = data_dir / "state.json"
     if path.exists():
@@ -203,7 +214,7 @@ def handle_amazon_sync(body: dict[str, Any], sure: SureClient, categorizer, data
     start = min(dates) - dt.timedelta(days=DATE_WINDOW_DAYS)
     end = max(dates) + dt.timedelta(days=DATE_WINDOW_DAYS)
     candidates = sure.amazon_transactions(start, end)
-    categories = sure.spending_categories()
+    categories = _load_spending_categories(sure)
     state = _load_state(data_dir)
 
     stats = {"updated": 0, "split": 0, "skipped": 0, "unmatched": 0, "missing_order": 0}
@@ -375,7 +386,7 @@ def make_handler(
                 cat_count = 0
                 sure_err = None
                 try:
-                    cats = SureClient(sure_url, sure_api_key).spending_categories()
+                    cats = _load_spending_categories(SureClient(sure_url, sure_api_key))
                     sure_ok = True
                     cat_count = len(cats)
                 except Exception as exc:

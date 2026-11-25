@@ -28,8 +28,9 @@ class FakeSure:
         self.updated = []
         self.splits = []
 
-    def spending_categories(self):
-        return self.cats
+    def spending_categories(self, exclude_names=None, include_parents=None):
+        excluded = set(exclude_names or ())
+        return {k: v for k, v in self.cats.items() if k not in excluded}
 
     def amazon_transactions(self, start, end):
         return self.txns
@@ -175,6 +176,25 @@ class CoreTests(unittest.TestCase):
             # Re-running should skip already handled transaction
             res2 = handle_amazon_sync({"charges": charges, "days": 365, "dry_run": False}, sure, cat, data_dir)
             self.assertEqual(res2["stats"]["skipped"], 1)
+
+    def test_spending_categories_exclude_and_include_parents(self):
+        from server.sure_client import SureClient
+
+        client = SureClient("http://example", "key")
+        sample = [
+            {"id": "1", "name": "Shopping", "subcategories_count": 0, "parent": None},
+            {"id": "2", "name": "Fun Money", "subcategories_count": 2, "parent": None},
+            {"id": "3", "name": "Adam Fun Money", "subcategories_count": 0, "parent": {"id": "2"}},
+            {"id": "4", "name": "Aanika Fun Money", "subcategories_count": 0, "parent": {"id": "2"}},
+            {"id": "5", "name": "Food & Drink", "subcategories_count": 1, "parent": None},
+            {"id": "6", "name": "Eating Out", "subcategories_count": 0, "parent": {"id": "5"}},
+        ]
+        with patch.object(client, "paged", return_value=iter(sample)):
+            cats = client.spending_categories(
+                exclude_names={"Adam Fun Money", "Aanika Fun Money"},
+                include_parents={"Fun Money"},
+            )
+        self.assertEqual(set(cats.keys()), {"Shopping", "Fun Money", "Eating Out"})
 
     def test_http_auth_and_health(self):
         with tempfile.TemporaryDirectory() as tmp:

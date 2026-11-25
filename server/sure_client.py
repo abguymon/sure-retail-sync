@@ -28,16 +28,25 @@ class SureClient:
                 return
             page += 1
 
-    def spending_categories(self, exclude_names=None) -> dict[str, str]:
-        """Return leaf spending categories mapped {name: id}."""
-        excluded = set(exclude_names or DEFAULT_NOT_SPENDING)
+    def spending_categories(self, exclude_names=None, include_parents=None) -> dict[str, str]:
+        """Return spending categories mapped {name: id}.
+
+        By default returns leaf spending categories (excluding Income and
+        investment/savings categories). Pass `exclude_names` to omit specific
+        categories from auto-categorization, and `include_parents` to allow
+        assigning directly to named parent categories (e.g. "Fun Money").
+        """
+        excluded = set(DEFAULT_NOT_SPENDING)
+        if exclude_names:
+            excluded.update(exclude_names)
+        allowed_parents = set(include_parents or ())
         cats = list(self.paged("categories", "categories"))
         income_ids = {c["id"] for c in cats if c["name"] == "Income"}
         return {
             c["name"]: c["id"]
             for c in cats
             if c["name"] not in excluded
-            and c.get("subcategories_count", 0) == 0
+            and (c.get("subcategories_count", 0) == 0 or c["name"] in allowed_parents)
             and (c.get("parent") or {}).get("id") not in income_ids
         }
 
