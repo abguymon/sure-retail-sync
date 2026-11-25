@@ -1,7 +1,28 @@
 const $ = (id) => document.getElementById(id);
 
+const SOURCES = {
+  amazon: {
+    label: "Amazon",
+    origin: "https://www.amazon.com/*",
+    signInUrl: "https://www.amazon.com/cpe/yourpayments/transactions",
+    signInCode: "AMAZON_SIGNIN_REQUIRED",
+  },
+  paypal: {
+    label: "PayPal",
+    origin: "https://www.paypal.com/*",
+    signInUrl: "https://www.paypal.com/myaccount/transactions/",
+    signInCode: "PAYPAL_SIGNIN_REQUIRED",
+  },
+};
+
 let cachedServerUrl = "";
-let hasAllHostPerms = false;
+let currentSource = "amazon";
+let signInTargetSource = "amazon";
+const grantedBySource = { amazon: false, paypal: false };
+
+function sourceInfo(source) {
+  return SOURCES[source] || SOURCES.amazon;
+}
 
 function showTab(tab) {
   const isSync = tab === "sync";
@@ -11,14 +32,26 @@ function showTab(tab) {
   $("view-settings").classList.toggle("hidden", isSync);
 }
 
+function setSource(source, persist = false) {
+  currentSource = source === "paypal" ? "paypal" : "amazon";
+  $("src-amazon").classList.toggle("active", currentSource === "amazon");
+  $("src-paypal").classList.toggle("active", currentSource === "paypal");
+  $("btn-sync").textContent = `Sync ${sourceInfo(currentSource).label}`;
+  if (persist) {
+    chrome.storage.local.set({ source: currentSource });
+  }
+}
+
 function setPill(text, kind) {
   const el = $("status-pill");
   el.textContent = text;
   el.className = `pill pill-${kind}`;
 }
 
-function requiredOrigins(serverUrl) {
-  const origins = ["https://www.amazon.com/*"];
+function requiredOrigins(serverUrl, source = null) {
+  const origins = source
+    ? [sourceInfo(source).origin]
+    : [SOURCES.amazon.origin, SOURCES.paypal.origin];
   if (serverUrl) {
     try {
       origins.push(new URL(serverUrl).origin + "/*");
@@ -30,12 +63,14 @@ function requiredOrigins(serverUrl) {
 }
 
 async function checkHostPerms(serverUrl) {
-  try {
-    hasAllHostPerms = await chrome.permissions.contains({
-      origins: requiredOrigins(serverUrl),
-    });
-  } catch {
-    hasAllHostPerms = false;
+  for (const key of Object.keys(SOURCES)) {
+    try {
+      grantedBySource[key] = await chrome.permissions.contains({
+        origins: requiredOrigins(serverUrl, key),
+      });
+    } catch {
+      grantedBySource[key] = false;
+    }
   }
 }
 
@@ -45,10 +80,23 @@ function renderProgress(state) {
   const cancelBtn = $("btn-cancel");
   const signin = $("signin-box");
   const busy = Boolean(state?.inProgress);
+
   $("btn-sync").disabled = busy;
   $("btn-dry-run").disabled = busy;
+  $("src-amazon").disabled = busy;
+  $("src-paypal").disabled = busy;
 
-  signin.classList.toggle("hidden", !state?.needsAmazonSignIn);
+  const signInSrc = state?.signInSource || (state?.needsAmazonSignIn ? "amazon" : null);
+  if (signInSrc) {
+    signInTargetSource = signInSrc;
+    const info = sourceInfo(signInSrc);
+    $("signin-text").textContent = `${info.label} session not signed in.`;
+    $("btn-open-signin").textContent = `Sign in to ${info.label}`;
+    signin.classList.remove("hidden");
+  } else {
+    signin.classList.add("hidden");
+  }
+
   cancelBtn.classList.toggle("hidden", !busy);
 
   if (!state || (!state.inProgress && !state.error)) {
@@ -67,7 +115,10 @@ function renderResult(res) {
     return;
   }
   sec.classList.remove("hidden");
-  $("results-title").textContent = res.dry_run ? "Last Dry Run (no writes)" : "Last Sync";
+  const srcLabel = sourceInfo(res.source).label;
+  $("results-title").textContent = res.dry_run
+    ? `Last ${srcLabel} Dry Run (no writes)`
+    : `Last ${srcLabel} Sync`;
   const dt = res.completedAt ? new Date(res.completedAt).toLocaleString() : "";
   $("results-meta").textContent = dt;
 
@@ -98,7 +149,7 @@ function renderResult(res) {
   if (!changes.length) {
     const empty = document.createElement("li");
     empty.className = "change-item muted";
-    empty.textContent = "No new Amazon transactions needed updates.";
+    empty.textContent = `No new ${srcLabel} transactions needed updates.`;
     list.replaceChildren(empty);
     return;
   }
@@ -119,11 +170,20 @@ function renderResult(res) {
       catSpan.textContent = catText;
       top.append(metaSpan, catSpan);
 
+      li.append(top);
+
+      if (ch.renamed_to) {
+        const rename = document.createElement("div");
+        rename.className = "change-rename";
+        rename.textContent = `Renamed → ${ch.renamed_to}`;
+        li.append(rename);
+      }
+
       const note = document.createElement("div");
       note.className = "change-note";
       note.textContent = ch.notes || "";
 
-      li.append(top, note);
+      li.append(note);
       return li;
     })
   );
@@ -151,21 +211,20 @@ async function refreshStatus() {
 
 async function triggerSync(dryRun) {
   const days = Number($("days-select").value || 45);
+  const src = currentSource;
+  const info = sourceInfo(src);
 
   // Request host permissions synchronously inside the click gesture (before any
   // other await) when not yet granted, as required by Firefox MV3.
-  if (!hasAllHostPerms) {
+  if (!grantedBySource[src]) {
     try {
       const granted = await chrome.permissions.request({
-        origins: requiredOrigins(cachedServerUrl),
+        origins: requiredOrigins(cachedServerUrl, src),
       });
-      hasAllHostPerms = Boolean(granted);
+      grantedBySource[src] = Boolean(granted);
       if (granted === false) {
-        renderProgress({
-          inProgress: false,
-          error: "Host permission for Amazon and your sync server is required.",
-          message: "Host permission for Amazon and your sync server is required.",
-        });
+        const msg = `Host permission for ${info.label} and your sync server is required.`;
+        renderProgress({ inProgress: false, error: msg, message: msg });
         return;
       }
     } catch {
@@ -173,9 +232,9 @@ async function triggerSync(dryRun) {
     }
   }
 
-  await chrome.storage.local.set({ days });
-  renderProgress({ inProgress: true, message: "Starting sync..." });
-  chrome.runtime.sendMessage({ type: "RUN_SYNC", dryRun, days }, (resp) => {
+  await chrome.storage.local.set({ days, source: src });
+  renderProgress({ inProgress: true, message: `Starting ${info.label} sync...` });
+  chrome.runtime.sendMessage({ type: "RUN_SYNC", source: src, dryRun, days }, (resp) => {
     if (chrome.runtime.lastError) {
       renderProgress({
         inProgress: false,
@@ -188,11 +247,17 @@ async function triggerSync(dryRun) {
       renderResult(resp.result);
       refreshStatus();
     } else if (resp && !resp.ok && resp.error) {
+      const signInSource =
+        resp.code === "AMAZON_SIGNIN_REQUIRED"
+          ? "amazon"
+          : resp.code === "PAYPAL_SIGNIN_REQUIRED"
+            ? "paypal"
+            : null;
       renderProgress({
         inProgress: false,
         error: resp.error,
         message: resp.error,
-        needsAmazonSignIn: resp.code === "AMAZON_SIGNIN_REQUIRED",
+        signInSource,
       });
     }
   });
@@ -201,6 +266,8 @@ async function triggerSync(dryRun) {
 async function init() {
   $("tab-sync").addEventListener("click", () => showTab("sync"));
   $("tab-settings").addEventListener("click", () => showTab("settings"));
+  $("src-amazon").addEventListener("click", () => setSource("amazon", true));
+  $("src-paypal").addEventListener("click", () => setSource("paypal", true));
   $("btn-sync").addEventListener("click", () => triggerSync(false));
   $("btn-dry-run").addEventListener("click", () => triggerSync(true));
   $("btn-cancel").addEventListener("click", () => {
@@ -208,20 +275,22 @@ async function init() {
       renderProgress({ inProgress: false, error: null, message: "" });
     });
   });
-  $("btn-open-amazon").addEventListener("click", () => {
-    chrome.tabs.create({ url: "https://www.amazon.com/cpe/yourpayments/transactions" });
+  $("btn-open-signin").addEventListener("click", () => {
+    chrome.tabs.create({ url: sourceInfo(signInTargetSource).signInUrl });
   });
 
   const stored = await chrome.storage.local.get({
     serverUrl: "",
     apiToken: "",
     days: 45,
+    source: "amazon",
     autoSync: false,
     syncState: null,
     lastResult: null,
   });
 
   cachedServerUrl = stored.serverUrl;
+  setSource(stored.source, false);
   await checkHostPerms(cachedServerUrl);
 
   $("input-url").value = stored.serverUrl;
@@ -268,12 +337,16 @@ async function init() {
 
     try {
       const granted = await chrome.permissions.request({ origins });
-      hasAllHostPerms = Boolean(granted);
+      if (granted) {
+        grantedBySource.amazon = true;
+        grantedBySource.paypal = true;
+      }
     } catch {
       // Continue to test connection
     }
 
     cachedServerUrl = rawUrl;
+    await checkHostPerms(cachedServerUrl);
     await chrome.storage.local.set({ serverUrl: rawUrl, apiToken, autoSync });
     chrome.runtime.sendMessage({ type: "UPDATE_ALARM", enabled: autoSync });
 

@@ -16,7 +16,14 @@ from server.amazon_parser import (
     items_for_charge,
     match_charges_to_sure,
 )
-from server.app import handle_amazon_plan, handle_amazon_sync, make_handler
+from server.app import (
+    handle_amazon_plan,
+    handle_amazon_sync,
+    handle_paypal_plan,
+    handle_paypal_sync,
+    make_handler,
+)
+from server.paypal_parser import is_generic_paypal_name, parse_paypal_filter_response
 from server.categorizer import NullCategorizer
 
 
@@ -33,6 +40,9 @@ class FakeSure:
         return {k: v for k, v in self.cats.items() if k not in excluded}
 
     def amazon_transactions(self, start, end):
+        return self.txns
+
+    def paypal_transactions(self, start, end):
         return self.txns
 
     def update_transaction(self, txn_id, **fields):
@@ -228,6 +238,61 @@ class CoreTests(unittest.TestCase):
             "Hobbies, crafts, treats",
         )
         self.assertIsNone(captured["payload"]["questions"]["item_0"]["criteria"]["Shopping"])
+
+    def test_paypal_parse_plan_and_sync_renames_generic(self):
+        payload = {
+            "data": {
+                "data": {
+                    "activity": {
+                        "nextPageToken": "tok-2",
+                        "transactions": [
+                            {
+                                "id": "PP-TX-123",
+                                "displayName": "Apple iCloud",
+                                "timeCreated": "2026-11-12T18:00:00Z",
+                                "grossAmount": {"amount": "-0.99"},
+                                "itemTitle": "50GB iCloud+ Storage",
+                            }
+                        ],
+                    }
+                }
+            }
+        }
+        parsed, next_tok = parse_paypal_filter_response(payload)
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(next_tok, "tok-2")
+        self.assertEqual(parsed[0]["cents"], -99)
+        self.assertTrue(is_generic_paypal_name("PAYPAL PURCHASE"))
+        self.assertTrue(is_generic_paypal_name("PayPal - PAYPAL PURCHASE"))
+        self.assertFalse(is_generic_paypal_name("DAVIDsTEA - PAYPAL * DAVIDSTEA"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            sure = FakeSure(
+                txns=[
+                    {
+                        "id": "sure-pp-1",
+                        "name": "PAYPAL PURCHASE",
+                        "date": "2026-11-13",
+                        "signed_amount_cents": -99,
+                        "account": {"name": "Spending Account (2493)"},
+                        "notes": "",
+                        "user_modified": False,
+                        "split_parent": False,
+                    }
+                ],
+                cats={"Subscriptions": "cat-sub", "Shopping": "cat-shop"},
+            )
+            plan = handle_paypal_plan({"filter_pages": [payload], "days": 365}, sure, data_dir)
+            self.assertEqual(plan["matched"], 1)
+            self.assertEqual(plan["needed_details"][0]["id"], "PP-TX-123")
+
+            cat = FakeCategorizer({"Apple iCloud — 50GB iCloud+ Storage": "Subscriptions"})
+            res = handle_paypal_sync({"charges": plan["charges"], "days": 365, "dry_run": False}, sure, cat, data_dir)
+            self.assertEqual(res["stats"]["updated"], 1)
+            self.assertEqual(sure.updated[0][1]["name"], "Apple iCloud (PayPal)")
+            self.assertEqual(sure.updated[0][1]["category_id"], "cat-sub")
+            self.assertIn("[paypal] Apple iCloud", sure.updated[0][1]["notes"])
 
     def test_http_auth_and_health(self):
         with tempfile.TemporaryDirectory() as tmp:

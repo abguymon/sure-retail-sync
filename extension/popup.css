@@ -75,6 +75,32 @@ h1 {
 .view { padding: 12px 14px 14px; }
 .hidden { display: none !important; }
 
+.source-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 3px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 10px;
+}
+.source-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.source-btn.active {
+  background: var(--primary);
+  color: #fff;
+}
+.source-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
 .row {
   display: flex;
   align-items: center;
@@ -178,6 +204,7 @@ select, input[type="url"], input[type="password"] {
   margin-bottom: 2px;
 }
 .change-cat { color: var(--primary); font-weight: 600; }
+.change-rename { color: var(--ok); font-size: 11px; margin-bottom: 2px; }
 .change-note { color: var(--muted); word-break: break-word; }
 
 .field {

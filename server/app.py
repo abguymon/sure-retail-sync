@@ -33,6 +33,14 @@ from .amazon_parser import (
     parse_transactions_json,
 )
 from .categorizer import build_categorizer
+from .paypal_parser import (
+    NOTE_MARK as PAYPAL_NOTE_MARK,
+    format_paypal_notes,
+    is_generic_paypal_name,
+    match_paypal_to_sure,
+    merge_paypal_detail,
+    parse_paypal_filter_response,
+)
 from .sure_client import SureClient
 
 log = logging.getLogger("sure-retail-sync")
@@ -74,12 +82,17 @@ def _order_cache_path(data_dir: Path, order_number: str) -> Path:
     return data_dir / "orders" / f"{safe}.json"
 
 
-def _is_already_handled(txn: dict[str, Any], state: dict[str, Any]) -> bool:
+def _paypal_cache_path(data_dir: Path, tx_id: str) -> Path:
+    safe = "".join(ch for ch in tx_id if ch.isalnum() or ch in "-_")
+    return data_dir / "paypal" / f"{safe}.json"
+
+
+def _is_already_handled(txn: dict[str, Any], state: dict[str, Any], note_mark: str = NOTE_MARK) -> bool:
     if txn["id"] in state["done"]:
         return True
     if txn.get("user_modified") or txn.get("split_parent"):
         return True
-    if NOTE_MARK in (txn.get("notes") or ""):
+    if note_mark in (txn.get("notes") or ""):
         return True
     return False
 
@@ -313,6 +326,187 @@ def handle_amazon_sync(body: dict[str, Any], sure: SureClient, categorizer, data
     }
 
 
+def _extract_paypal_charges(body: dict[str, Any], days: int | None) -> tuple[list[dict[str, Any]], str | None]:
+    charges: list[dict[str, Any]] = []
+    next_token = None
+
+    for page in body.get("filter_pages") or []:
+        parsed, next_token = parse_paypal_filter_response(page)
+        if not parsed and isinstance(page, dict):
+            log.info("PayPal filter page parsed 0 items; top keys=%s", list(page.keys())[:10])
+        charges.extend(parsed)
+
+    if body.get("charges"):
+        charges.extend(body["charges"])
+
+    seen = set()
+    deduped = []
+    for c in charges:
+        key = c.get("id") or (c.get("completed_date"), c.get("cents"), c.get("merchant"))
+        if key not in seen:
+            seen.add(key)
+            deduped.append(c)
+
+    if days is not None:
+        cutoff = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+        oldest = min((c["completed_date"] for c in deduped), default=None)
+        deduped = [c for c in deduped if c["completed_date"] >= cutoff]
+        if oldest and oldest < cutoff:
+            next_token = None
+
+    return deduped, next_token
+
+
+def handle_paypal_plan(body: dict[str, Any], sure: SureClient, data_dir: Path) -> dict[str, Any]:
+    days = int(body.get("days", 45))
+    charges, next_token = _extract_paypal_charges(body, days=days)
+    if not charges:
+        return {
+            "charges_parsed": 0,
+            "charges": [],
+            "matched": 0,
+            "skipped": 0,
+            "unmatched": 0,
+            "needed_details": [],
+            "cached_details": [],
+            "next_page_token": next_token,
+        }
+
+    dates = [dt.date.fromisoformat(c["completed_date"]) for c in charges]
+    start = min(dates) - dt.timedelta(days=DATE_WINDOW_DAYS)
+    end = max(dates) + dt.timedelta(days=DATE_WINDOW_DAYS)
+    candidates = sure.paypal_transactions(start, end)
+    state = _load_state(data_dir)
+
+    needed: dict[str, str] = {}
+    cached: set[str] = set()
+    matched = skipped = unmatched = 0
+
+    for c, txn in match_paypal_to_sure(charges, candidates, date_window_days=DATE_WINDOW_DAYS):
+        if txn is None:
+            unmatched += 1
+            continue
+        if _is_already_handled(txn, state, note_mark=PAYPAL_NOTE_MARK):
+            skipped += 1
+            continue
+        matched += 1
+        tid = c["id"]
+        if _paypal_cache_path(data_dir, tid).exists():
+            cached.add(tid)
+        else:
+            needed[tid] = f"https://www.paypal.com/myaccount/transactions/details/inline/{tid}"
+
+    return {
+        "charges_parsed": len(charges),
+        "charges": charges,
+        "matched": matched,
+        "skipped": skipped,
+        "unmatched": unmatched,
+        "needed_details": [{"id": k, "url": v} for k, v in needed.items()],
+        "cached_details": sorted(cached),
+        "next_page_token": next_token,
+    }
+
+
+def handle_paypal_sync(body: dict[str, Any], sure: SureClient, categorizer, data_dir: Path) -> dict[str, Any]:
+    days = int(body.get("days", 45))
+    dry_run = bool(body.get("dry_run", False))
+    sure.dry_run = dry_run
+
+    charges, _ = _extract_paypal_charges(body, days=days)
+    paypal_dir = data_dir / "paypal"
+    paypal_dir.mkdir(parents=True, exist_ok=True)
+
+    # Cache newly fetched detail payloads
+    details_by_id = body.get("details_json") or {}
+    for tid, payload in details_by_id.items():
+        if isinstance(payload, dict):
+            _paypal_cache_path(data_dir, tid).write_text(json.dumps(payload, indent=2))
+
+    if not charges:
+        return {
+            "dry_run": dry_run,
+            "categorizer": categorizer.name,
+            "stats": {"updated": 0, "split": 0, "skipped": 0, "unmatched": 0},
+            "changes": [],
+        }
+
+    dates = [dt.date.fromisoformat(c["completed_date"]) for c in charges]
+    start = min(dates) - dt.timedelta(days=DATE_WINDOW_DAYS)
+    end = max(dates) + dt.timedelta(days=DATE_WINDOW_DAYS)
+    candidates = sure.paypal_transactions(start, end)
+    categories = _load_spending_categories(sure)
+    state = _load_state(data_dir)
+
+    stats = {"updated": 0, "split": 0, "skipped": 0, "unmatched": 0}
+    changes: list[dict[str, Any]] = []
+
+    for c, txn in match_paypal_to_sure(charges, candidates, date_window_days=DATE_WINDOW_DAYS):
+        if txn is None:
+            stats["unmatched"] += 1
+            continue
+        if _is_already_handled(txn, state, note_mark=PAYPAL_NOTE_MARK):
+            stats["skipped"] += 1
+            continue
+
+        tx = dict(c)
+        cache_path = _paypal_cache_path(data_dir, tx["id"])
+        if cache_path.exists():
+            try:
+                tx = merge_paypal_detail(tx, json.loads(cache_path.read_text()))
+            except Exception as exc:
+                log.warning("Failed to merge PayPal cache %s: %s", tx["id"], exc)
+
+        merchant = tx.get("merchant") or ""
+        if not merchant and not tx.get("description"):
+            stats["unmatched"] += 1
+            continue
+
+        note = format_paypal_notes(tx)
+        item_title = f"{merchant} — {tx['description']}" if tx.get("description") and merchant else (merchant or tx["description"])
+        raw_cats = (
+            categorizer.categorize("PayPal", [{"title": item_title, "price": abs(tx["grand_total"])}], categories)
+            if categories
+            else [None]
+        )
+        chosen_cat = raw_cats[0] if raw_cats and raw_cats[0] in categories else None
+
+        fields: dict[str, Any] = {"notes": note}
+        if chosen_cat:
+            fields["category_id"] = categories[chosen_cat]
+        if merchant and is_generic_paypal_name(txn.get("name") or ""):
+            fields["name"] = f"{merchant} (PayPal)"
+
+        sure.update_transaction(txn["id"], **fields)
+        stats["updated"] += 1
+        changes.append({
+            "action": "updated" if chosen_cat else "notes_only",
+            "date": txn["date"],
+            "account": txn["account"]["name"],
+            "amount": abs(tx["grand_total"]),
+            "merchant": merchant,
+            "category": chosen_cat,
+            "notes": note,
+            "renamed_to": fields.get("name"),
+        })
+
+        if not dry_run:
+            state["done"][txn["id"]] = {
+                "source": "paypal",
+                "paypal_id": tx["id"],
+                "at": dt.datetime.now().isoformat(timespec="seconds"),
+            }
+            _save_state(data_dir, state)
+
+    log.info("paypal sync%s: %s", " (DRY RUN)" if dry_run else "", stats)
+    return {
+        "dry_run": dry_run,
+        "categorizer": categorizer.name,
+        "stats": stats,
+        "changes": changes,
+    }
+
+
 def _check_bearer(auth_header: str, expected_token: str) -> bool:
     if not expected_token:
         return False
@@ -401,14 +595,14 @@ def make_handler(
                         "categorizer": build_categorizer().name,
                         "synced_transactions": len(state.get("done", {})),
                         "cached_orders": cached_count,
-                        "sources": ["amazon"],
+                        "sources": ["amazon", "paypal"],
                     },
                 )
             return self._send_json(404, {"error": "not_found"})
 
         def do_POST(self):
             path = self.path.split("?", 1)[0].rstrip("/")
-            if path not in ("/api/amazon/plan", "/api/amazon/sync"):
+            if path not in ("/api/amazon/plan", "/api/amazon/sync", "/api/paypal/plan", "/api/paypal/sync"):
                 return self._send_json(404, {"error": "not_found"})
             if not self._require_auth():
                 return
@@ -419,8 +613,12 @@ def make_handler(
                 sure = SureClient(sure_url, sure_api_key)
                 if path == "/api/amazon/plan":
                     result = handle_amazon_plan(body, sure, data_dir)
-                else:
+                elif path == "/api/amazon/sync":
                     result = handle_amazon_sync(body, sure, build_categorizer(), data_dir)
+                elif path == "/api/paypal/plan":
+                    result = handle_paypal_plan(body, sure, data_dir)
+                else:
+                    result = handle_paypal_sync(body, sure, build_categorizer(), data_dir)
                 return self._send_json(200, result)
             except Exception as exc:
                 log.exception("Request %s failed", path)

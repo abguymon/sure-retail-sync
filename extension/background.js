@@ -1,4 +1,6 @@
 const AMAZON_TX_URL = "https://www.amazon.com/cpe/yourpayments/transactions";
+const PAYPAL_ACTIVITY_URL = "https://www.paypal.com/myaccount/transactions/";
+const PAYPAL_FILTER_URL = "https://www.paypal.com/myaccount/transactions/filter";
 const DAILY_ALARM = "sure-retail-sync-daily";
 const MAX_PAGES = 10;
 const FETCH_TIMEOUT_MS = 30000;
@@ -18,6 +20,13 @@ const sleep = (ms, signal) =>
       { once: true }
     );
   });
+
+function formatIsoDate(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
 
 async function fetchWithTimeout(url, options = {}, parentSignal = null) {
   const controller = new AbortController();
@@ -74,7 +83,7 @@ async function getReconciledSyncState() {
       inProgress: false,
       message: "Previous sync was interrupted. Ready to retry.",
       error: null,
-      needsAmazonSignIn: false,
+      signInSource: null,
       updatedAt: new Date().toISOString(),
     };
     await chrome.storage.local.set({ syncState: cleared });
@@ -84,7 +93,7 @@ async function getReconciledSyncState() {
   return syncState;
 }
 
-function looksLikeSignIn(url, html) {
+function looksLikeAmazonSignIn(url, html) {
   if ((url || "").includes("/ap/signin")) return true;
   if (!html) return false;
   return (
@@ -92,6 +101,35 @@ function looksLikeSignIn(url, html) {
     html.includes("ap_email") &&
     !html.includes("transaction")
   );
+}
+
+function looksLikePayPalSignIn(url, text) {
+  const u = (url || "").toLowerCase();
+  if (u.includes("/signin") || u.includes("/authflow") || u.includes("/login")) return true;
+  if (!text) return false;
+  const trimmed = text.trimStart();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) return false;
+  return (
+    (text.includes('name="login_email"') || text.includes('id="btnLogin"') || text.includes("Log in to your PayPal account")) &&
+    !text.includes("myaccount/transactions/filter")
+  );
+}
+
+function extractPayPalCsrf(html) {
+  if (!html) return "";
+  const patterns = [
+    /"_csrf"\s*:\s*"([^"]+)"/,
+    /"csrf"\s*:\s*"([^"]+)"/,
+    /name=["']_csrf["'][^>]*value=["']([^"']+)["']/i,
+    /value=["']([^"']+)["'][^>]*name=["']_csrf["']/i,
+    /<meta[^>]+name=["']csrf-token["'][^>]+content=["']([^"']+)["']/i,
+    /data-csrf-token=["']([^"']+)["']/i,
+  ];
+  for (const re of patterns) {
+    const m = html.match(re);
+    if (m && m[1]) return m[1];
+  }
+  return "";
 }
 
 async function fetchAmazonText(url, options = {}, signal = null) {
@@ -105,7 +143,7 @@ async function fetchAmazonText(url, options = {}, signal = null) {
     signal
   );
   const text = await resp.text();
-  if (looksLikeSignIn(resp.url, text)) {
+  if (looksLikeAmazonSignIn(resp.url, text)) {
     const err = new Error("Not signed in to Amazon. Sign in and try again.");
     err.code = "AMAZON_SIGNIN_REQUIRED";
     throw err;
@@ -114,6 +152,59 @@ async function fetchAmazonText(url, options = {}, signal = null) {
     throw new Error(`Amazon returned HTTP ${resp.status} for ${url}`);
   }
   return text;
+}
+
+async function fetchPayPalPage(url, signal = null) {
+  const resp = await fetchWithTimeout(
+    url,
+    {
+      credentials: "include",
+      redirect: "follow",
+    },
+    signal
+  );
+  const text = await resp.text();
+  if (looksLikePayPalSignIn(resp.url, text) || resp.status === 401) {
+    const err = new Error("Not signed in to PayPal. Sign in and try again.");
+    err.code = "PAYPAL_SIGNIN_REQUIRED";
+    throw err;
+  }
+  if (!resp.ok) {
+    throw new Error(`PayPal returned HTTP ${resp.status} for ${url}`);
+  }
+  return text;
+}
+
+async function fetchPayPalJson(url, csrfToken, signal = null) {
+  const headers = {
+    Accept: "application/json",
+    "X-Requested-With": "XMLHttpRequest",
+  };
+  if (csrfToken) headers["x-csrf-token"] = csrfToken;
+
+  const resp = await fetchWithTimeout(
+    url,
+    {
+      credentials: "include",
+      redirect: "follow",
+      headers,
+    },
+    signal
+  );
+  const text = await resp.text();
+  if (looksLikePayPalSignIn(resp.url, text) || resp.status === 401) {
+    const err = new Error("Not signed in to PayPal. Sign in and try again.");
+    err.code = "PAYPAL_SIGNIN_REQUIRED";
+    throw err;
+  }
+  if (!resp.ok) {
+    throw new Error(`PayPal returned HTTP ${resp.status} for ${url}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`PayPal returned non-JSON response (${resp.status}): ${text.slice(0, 120)}`);
+  }
 }
 
 async function callServer(settings, path, { method = "GET", body = null, signal = null } = {}) {
@@ -156,7 +247,7 @@ async function runAmazonSync({ dryRun = false, days = null } = {}) {
 
   await chrome.action.setBadgeText({ text: "..." });
   await chrome.action.setBadgeBackgroundColor({ color: "#3b82f6" });
-  await setProgress(true, "Fetching Amazon Transactions page 1...");
+  await setProgress(true, "Fetching Amazon Transactions page 1...", { source: "amazon" });
 
   try {
     const firstHtml = await fetchAmazonText(AMAZON_TX_URL, {}, signal);
@@ -175,7 +266,7 @@ async function runAmazonSync({ dryRun = false, days = null } = {}) {
     let pageNum = 1;
     while (nextPage && pageNum < MAX_PAGES) {
       pageNum += 1;
-      await setProgress(true, `Fetching Amazon Transactions page ${pageNum}...`);
+      await setProgress(true, `Fetching Amazon Transactions page ${pageNum}...`, { source: "amazon" });
       await sleep(800, signal);
 
       let pagePlan;
@@ -229,7 +320,8 @@ async function runAmazonSync({ dryRun = false, days = null } = {}) {
       const [orderNum, url] = neededList[i];
       await setProgress(
         true,
-        `Fetching order details (${i + 1}/${neededList.length}): ${orderNum}`
+        `Fetching order details (${i + 1}/${neededList.length}): ${orderNum}`,
+        { source: "amazon" }
       );
       try {
         ordersHtml[orderNum] = await fetchAmazonText(url, {}, signal);
@@ -244,7 +336,8 @@ async function runAmazonSync({ dryRun = false, days = null } = {}) {
       true,
       dryRun
         ? "Running dry-run categorization on server..."
-        : "Categorizing & updating transactions in Sure..."
+        : "Categorizing & updating Amazon transactions in Sure...",
+      { source: "amazon" }
     );
 
     const result = await callServer(settings, "/api/amazon/sync", {
@@ -260,6 +353,7 @@ async function runAmazonSync({ dryRun = false, days = null } = {}) {
 
     const summary = {
       ...result,
+      source: "amazon",
       days: lookback,
       pagesFetched: pageNum,
       ordersFetched: Object.keys(ordersHtml).length,
@@ -268,9 +362,10 @@ async function runAmazonSync({ dryRun = false, days = null } = {}) {
 
     const touched = (result.stats?.updated || 0) + (result.stats?.split || 0);
     await chrome.storage.local.set({ lastResult: summary });
-    await setProgress(false, dryRun ? "Dry run complete." : "Sync complete.", {
+    await setProgress(false, dryRun ? "Amazon dry run complete." : "Amazon sync complete.", {
+      source: "amazon",
       error: null,
-      needsAmazonSignIn: false,
+      signInSource: null,
     });
     await chrome.action.setBadgeText({ text: touched > 0 ? String(touched) : "" });
     await chrome.action.setBadgeBackgroundColor({ color: "#16a34a" });
@@ -279,8 +374,148 @@ async function runAmazonSync({ dryRun = false, days = null } = {}) {
     const cancelled = err.name === "AbortError" && signal.aborted;
     const needsSignIn = err.code === "AMAZON_SIGNIN_REQUIRED";
     await setProgress(false, cancelled ? "Sync cancelled." : err.message || String(err), {
+      source: "amazon",
       error: cancelled ? null : err.message || String(err),
-      needsAmazonSignIn: needsSignIn,
+      signInSource: needsSignIn ? "amazon" : null,
+    });
+    await chrome.action.setBadgeText({ text: cancelled ? "" : needsSignIn ? "AUTH" : "ERR" });
+    if (!cancelled) await chrome.action.setBadgeBackgroundColor({ color: "#dc2626" });
+    throw err;
+  } finally {
+    if (activeController === controller) {
+      activeController = null;
+    }
+  }
+}
+
+async function runPayPalSync({ dryRun = false, days = null } = {}) {
+  if (activeController) {
+    throw new Error("A sync is already running. Click Cancel to stop it first.");
+  }
+
+  const controller = new AbortController();
+  activeController = controller;
+  const { signal } = controller;
+
+  const settings = await getSettings();
+  const lookback = Number(days || settings.days || 45);
+
+  await chrome.action.setBadgeText({ text: "..." });
+  await chrome.action.setBadgeBackgroundColor({ color: "#3b82f6" });
+  await setProgress(true, "Checking PayPal session...", { source: "paypal" });
+
+  try {
+    const activityHtml = await fetchPayPalPage(PAYPAL_ACTIVITY_URL, signal);
+    const csrfToken = extractPayPalCsrf(activityHtml);
+
+    const now = new Date();
+    const startObj = new Date(now.getTime() - (lookback + 3) * 86400 * 1000);
+    const endObj = new Date(now.getTime() + 2 * 86400 * 1000);
+    const startDate = formatIsoDate(startObj);
+    const endDate = formatIsoDate(endObj);
+
+    const allCharges = [];
+    const neededMap = new Map();
+    const seenTokens = new Set();
+    let nextToken = "";
+    let pageNum = 0;
+
+    while (pageNum < MAX_PAGES) {
+      pageNum += 1;
+      await setProgress(true, `Fetching PayPal activity page ${pageNum}...`, { source: "paypal" });
+
+      const params = new URLSearchParams({
+        transactionType: "ALL",
+        nextPageToken: nextToken,
+        freeTextSearch: "",
+        isClearFreeTextSearch: "false",
+        isClearFilterSelection: "false",
+        isClientSideFiltering: "false",
+        selectedCurrency: "ALL",
+        startDate,
+        endDate,
+      });
+
+      const payload = await fetchPayPalJson(`${PAYPAL_FILTER_URL}?${params.toString()}`, csrfToken, signal);
+      const plan = await callServer(settings, "/api/paypal/plan", {
+        method: "POST",
+        body: { filter_pages: [payload], days: lookback },
+        signal,
+      });
+
+      for (const c of plan.charges || []) allCharges.push(c);
+      for (const d of plan.needed_details || []) neededMap.set(d.id, d.url);
+
+      const tok = plan.next_page_token || "";
+      if (!tok || seenTokens.has(tok)) break;
+      seenTokens.add(tok);
+      nextToken = tok;
+      await sleep(700, signal);
+    }
+
+    const neededList = Array.from(neededMap.entries());
+    const detailsJson = {};
+    for (let i = 0; i < neededList.length; i += 1) {
+      const [tid, url] = neededList[i];
+      await setProgress(
+        true,
+        `Fetching PayPal details (${i + 1}/${neededList.length})...`,
+        { source: "paypal" }
+      );
+      try {
+        detailsJson[tid] = await fetchPayPalJson(url, csrfToken, signal);
+      } catch (err) {
+        if (err.code === "PAYPAL_SIGNIN_REQUIRED" || err.name === "AbortError") throw err;
+        console.warn("PayPal detail fetch failed", tid, err);
+      }
+      if (i + 1 < neededList.length) await sleep(600, signal);
+    }
+
+    await setProgress(
+      true,
+      dryRun
+        ? "Running PayPal dry-run categorization on server..."
+        : "Categorizing & updating PayPal transactions in Sure...",
+      { source: "paypal" }
+    );
+
+    const result = await callServer(settings, "/api/paypal/sync", {
+      method: "POST",
+      body: {
+        charges: allCharges,
+        details_json: detailsJson,
+        days: lookback,
+        dry_run: dryRun,
+      },
+      signal,
+    });
+
+    const summary = {
+      ...result,
+      source: "paypal",
+      days: lookback,
+      pagesFetched: pageNum,
+      detailsFetched: Object.keys(detailsJson).length,
+      completedAt: new Date().toISOString(),
+    };
+
+    const touched = (result.stats?.updated || 0) + (result.stats?.split || 0);
+    await chrome.storage.local.set({ lastResult: summary });
+    await setProgress(false, dryRun ? "PayPal dry run complete." : "PayPal sync complete.", {
+      source: "paypal",
+      error: null,
+      signInSource: null,
+    });
+    await chrome.action.setBadgeText({ text: touched > 0 ? String(touched) : "" });
+    await chrome.action.setBadgeBackgroundColor({ color: "#16a34a" });
+    return summary;
+  } catch (err) {
+    const cancelled = err.name === "AbortError" && signal.aborted;
+    const needsSignIn = err.code === "PAYPAL_SIGNIN_REQUIRED";
+    await setProgress(false, cancelled ? "Sync cancelled." : err.message || String(err), {
+      source: "paypal",
+      error: cancelled ? null : err.message || String(err),
+      signInSource: needsSignIn ? "paypal" : null,
     });
     await chrome.action.setBadgeText({ text: cancelled ? "" : needsSignIn ? "AUTH" : "ERR" });
     if (!cancelled) await chrome.action.setBadgeBackgroundColor({ color: "#dc2626" });
@@ -297,7 +532,7 @@ async function cancelActiveSync() {
     activeController.abort(new DOMException("Cancelled", "AbortError"));
     activeController = null;
   }
-  await setProgress(false, "Sync cancelled.", { error: null, needsAmazonSignIn: false });
+  await setProgress(false, "Sync cancelled.", { error: null, signInSource: null });
   await chrome.action.setBadgeText({ text: "" });
 }
 
@@ -322,13 +557,19 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   try {
     await runAmazonSync({ dryRun: false });
   } catch (err) {
-    console.warn("Scheduled sync failed:", err.message);
+    console.warn("Scheduled Amazon sync failed:", err.message);
+  }
+  try {
+    await runPayPalSync({ dryRun: false });
+  } catch (err) {
+    console.warn("Scheduled PayPal sync failed:", err.message);
   }
 });
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "RUN_SYNC") {
-    runAmazonSync({ dryRun: Boolean(msg.dryRun), days: msg.days })
+    const runner = msg.source === "paypal" ? runPayPalSync : runAmazonSync;
+    runner({ dryRun: Boolean(msg.dryRun), days: msg.days })
       .then((res) => sendResponse({ ok: true, result: res }))
       .catch((err) => sendResponse({ ok: false, error: err.message, code: err.code }));
     return true;

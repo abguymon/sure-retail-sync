@@ -5,6 +5,7 @@ import requests
 
 DEFAULT_NOT_SPENDING = {"Income", "Investment Contributions", "Savings & Investments"}
 AMAZON_TX_RE = re.compile(r"amazon|amzn|amz\*|prime video|kindle|audible", re.I)
+PAYPAL_TX_RE = re.compile(r"paypal", re.I)
 
 
 class SureClient:
@@ -52,6 +53,13 @@ class SureClient:
 
     def amazon_transactions(self, start_date, end_date, include_depository: bool = True) -> list[dict]:
         """Return Sure transactions in [start_date, end_date] that look like Amazon charges."""
+        return self._matching_transactions(start_date, end_date, AMAZON_TX_RE, include_depository)
+
+    def paypal_transactions(self, start_date, end_date, include_depository: bool = True) -> list[dict]:
+        """Return Sure transactions in [start_date, end_date] that look like PayPal charges."""
+        return self._matching_transactions(start_date, end_date, PAYPAL_TX_RE, include_depository)
+
+    def _matching_transactions(self, start_date, end_date, pattern, include_depository: bool = True) -> list[dict]:
         allowed_types = {"credit_card", "depository"} if include_depository else {"credit_card"}
         out = []
         for t in self.paged(
@@ -61,7 +69,7 @@ class SureClient:
             end_date=end_date.isoformat(),
         ):
             acc_type = (t.get("account") or {}).get("account_type", "")
-            if acc_type in allowed_types and AMAZON_TX_RE.search(t.get("name") or ""):
+            if acc_type in allowed_types and pattern.search(t.get("name") or ""):
                 out.append(t)
         return out
 

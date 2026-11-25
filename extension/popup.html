@@ -18,6 +18,11 @@
   </header>
 
   <main id="view-sync" class="view">
+    <div class="source-switch" role="tablist" aria-label="Source">
+      <button id="src-amazon" class="source-btn active" type="button" data-source="amazon">Amazon</button>
+      <button id="src-paypal" class="source-btn" type="button" data-source="paypal">PayPal</button>
+    </div>
+
     <div class="row">
       <label for="days-select">Lookback</label>
       <select id="days-select">
@@ -38,8 +43,8 @@
       <button id="btn-cancel" class="btn btn-small hidden" type="button">Cancel</button>
     </div>
     <div id="signin-box" class="banner banner-warn hidden">
-      <span>Amazon session not signed in.</span>
-      <button id="btn-open-amazon" class="btn btn-small" type="button">Sign in to Amazon</button>
+      <span id="signin-text">Session not signed in.</span>
+      <button id="btn-open-signin" class="btn btn-small" type="button">Sign in</button>
     </div>
 
     <section id="results-section" class="results hidden">
