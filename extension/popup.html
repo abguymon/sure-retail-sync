@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Sure Retail Sync</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header class="header">
+    <div>
+      <h1>Sure Retail Sync</h1>
+      <div id="status-pill" class="pill pill-muted">Checking connection...</div>
+    </div>
+    <nav class="tabs">
+      <button id="tab-sync" class="tab active" type="button">Sync</button>
+      <button id="tab-settings" class="tab" type="button">Settings</button>
+    </nav>
+  </header>
+
+  <main id="view-sync" class="view">
+    <div class="row">
+      <label for="days-select">Lookback</label>
+      <select id="days-select">
+        <option value="14">Last 14 days</option>
+        <option value="30">Last 30 days</option>
+        <option value="45" selected>Last 45 days</option>
+        <option value="90">Last 90 days</option>
+      </select>
+    </div>
+
+    <div class="actions">
+      <button id="btn-dry-run" class="btn btn-secondary" type="button">Dry Run</button>
+      <button id="btn-sync" class="btn btn-primary" type="button">Sync Amazon</button>
+    </div>
+
+    <div id="progress-box" class="banner hidden"></div>
+    <div id="signin-box" class="banner banner-warn hidden">
+      <span>Amazon session not signed in.</span>
+      <button id="btn-open-amazon" class="btn btn-small" type="button">Sign in to Amazon</button>
+    </div>
+
+    <section id="results-section" class="results hidden">
+      <div class="results-header">
+        <span id="results-title">Last Run</span>
+        <span id="results-meta" class="muted"></span>
+      </div>
+      <div id="stats-grid" class="stats-grid"></div>
+      <ul id="changes-list" class="changes-list"></ul>
+    </section>
+  </main>
+
+  <main id="view-settings" class="view hidden">
+    <form id="settings-form">
+      <label class="field">
+        <span>Sync Server URL</span>
+        <input id="input-url" type="url" placeholder="https://sure.example.com/sync" required />
+      </label>
+      <label class="field">
+        <span>Sync API Token</span>
+        <input id="input-token" type="password" placeholder="Bearer token from server .env" required />
+      </label>
+      <label class="checkbox-field">
+        <input id="input-auto" type="checkbox" />
+        <span>Auto-sync once daily while Chrome is open</span>
+      </label>
+      <button id="btn-save" class="btn btn-primary full" type="submit">Save &amp; Test Connection</button>
+      <div id="settings-msg" class="banner hidden"></div>
+    </form>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>

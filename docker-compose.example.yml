@@ -1,0 +1,11 @@
+services:
+  sure-retail-sync:
+    build: .
+    container_name: sure-retail-sync
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./data:/data
+    env_file:
+      - .env
