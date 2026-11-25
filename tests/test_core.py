@@ -319,12 +319,14 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(sure.updated[0][1]["category_id"], "cat-sub")
             self.assertIn("[paypal] Apple iCloud", sure.updated[0][1]["notes"])
 
-        # Verify inline detail merge extracts itemDetails.itemList & fundingSourceList.last4 and skips "Purchase amount"
+        # Verify inline detail merge extracts itemDetails.itemList & fundingSourceList.last4 and skips boilerplate
         from server.paypal_parser import merge_paypal_detail
         merged = merge_paypal_detail(
             {"id": "8JY", "merchant": "DAVIDsTEA", "description": "", "payment_method_last_4": None},
             {
                 "data": {
+                    "type": "PRE_APPROVED_PAYMENT",
+                    "descriptionInfo": {"content": {"transactionDescriptionText": "Nov 4 . Payment"}},
                     "itemDetails": {
                         "itemList": [
                             {"name": "Purchase amount"},
@@ -337,6 +339,31 @@ class CoreTests(unittest.TestCase):
         )
         self.assertEqual(merged["description"], "Candy Cane Crush Tea")
         self.assertEqual(merged["payment_method_last_4"], "2510")
+
+        # Verify already-categorized non-generic PayPal row keeps its category and only updates notes
+        with tempfile.TemporaryDirectory() as tmp2:
+            sure2 = FakeSure(
+                txns=[
+                    {
+                        "id": "sure-pp-vis",
+                        "name": "Visible - PAYPAL *VISIBLESERV",
+                        "date": "2026-11-15",
+                        "signed_amount_cents": -1999,
+                        "account": {"name": "Venture (2510)"},
+                        "category": {"id": "cat-util", "name": "Utilities"},
+                        "notes": "",
+                        "user_modified": False,
+                        "split_parent": False,
+                    }
+                ],
+                cats={"Utilities": "cat-util", "Shopping": "cat-shop"},
+            )
+            cat2 = FakeCategorizer({"Steam Games": "Shopping"})
+            res2 = handle_paypal_sync({"charges": [parsed[1]], "days": 365, "dry_run": False}, sure2, cat2, Path(tmp2))
+            self.assertEqual(res2["stats"]["updated"], 1)
+            self.assertEqual(res2["changes"][0]["category"], "Utilities (kept)")
+            self.assertNotIn("category_id", sure2.updated[0][1])
+            self.assertNotIn("name", sure2.updated[0][1])
 
     def test_http_auth_and_health(self):
         with tempfile.TemporaryDirectory() as tmp:

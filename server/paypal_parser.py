@@ -225,9 +225,14 @@ def _extract_description(tx: dict[str, Any]) -> str:
         "purchase",
         "purchase amount",
         "preapproved payment",
+        "pre_approved_payment",
+        "preapproved_payment",
         "automatic payment",
         "express checkout payment",
+        "express_checkout",
+        "instant_payment",
         "mobile payment",
+        "web_accept",
         "subtotal",
         "tax",
         "sales tax",
@@ -236,12 +241,18 @@ def _extract_description(tx: dict[str, Any]) -> str:
         "total",
         "discount",
     }
+    date_payment_re = re.compile(
+        r"^[A-Z][a-z]{2,8}\s+\d{1,2}(?:,\s*\d{4})?\s*[.·•-]\s*(?:Payment|Purchase|Automatic Payment|Preapproved Payment|Refund)$",
+        re.I,
+    )
 
     def _add(text: Any) -> None:
         if not isinstance(text, str):
             return
         s = re.sub(r"\s+", " ", text).strip().strip('"').strip()
-        if s and s.lower() not in generic_desc and s not in parts:
+        if not s or s.lower() in generic_desc or date_payment_re.match(s):
+            return
+        if s not in parts:
             parts.append(s)
 
     def _add_item_list(items: Any) -> None:

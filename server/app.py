@@ -498,19 +498,27 @@ def handle_paypal_sync(body: dict[str, Any], sure: SureClient, categorizer, data
             continue
 
         note = format_paypal_notes(tx)
-        item_title = f"{merchant} — {tx['description']}" if tx.get("description") and merchant else (merchant or tx["description"])
-        raw_cats = (
-            categorizer.categorize("PayPal", [{"title": item_title, "price": abs(tx["grand_total"])}], categories)
-            if categories
-            else [None]
-        )
-        chosen_cat = raw_cats[0] if raw_cats and raw_cats[0] in categories else None
+        generic_name = is_generic_paypal_name(txn.get("name") or "")
+        existing_cat = (txn.get("category") or {}).get("name") if isinstance(txn.get("category"), dict) else None
 
         fields: dict[str, Any] = {"notes": note}
-        if chosen_cat:
-            fields["category_id"] = categories[chosen_cat]
-        if merchant and is_generic_paypal_name(txn.get("name") or ""):
-            fields["name"] = f"{merchant} (PayPal)"
+        if existing_cat and not generic_name:
+            # Already named and categorized in Sure (e.g., Visible -> Utilities): keep category, enrich notes only
+            chosen_cat = None
+            display_cat = f"{existing_cat} (kept)"
+        else:
+            item_title = f"{merchant} — {tx['description']}" if tx.get("description") and merchant else (merchant or tx["description"])
+            raw_cats = (
+                categorizer.categorize("PayPal", [{"title": item_title, "price": abs(tx["grand_total"])}], categories)
+                if categories
+                else [None]
+            )
+            chosen_cat = raw_cats[0] if raw_cats and raw_cats[0] in categories else None
+            display_cat = chosen_cat
+            if chosen_cat:
+                fields["category_id"] = categories[chosen_cat]
+            if merchant and generic_name:
+                fields["name"] = f"{merchant} (PayPal)"
 
         sure.update_transaction(txn["id"], **fields)
         stats["updated"] += 1
@@ -520,7 +528,7 @@ def handle_paypal_sync(body: dict[str, Any], sure: SureClient, categorizer, data
             "account": txn["account"]["name"],
             "amount": abs(tx["grand_total"]),
             "merchant": merchant,
-            "category": chosen_cat,
+            "category": display_cat,
             "notes": note,
             "renamed_to": fields.get("name"),
         })
