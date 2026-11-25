@@ -44,39 +44,61 @@ function renderResult(res) {
   $("results-meta").textContent = dt;
 
   const s = res.stats || {};
-  $("stats-grid").innerHTML = [
-    ["Updated", s.updated || 0],
-    ["Split", s.split || 0],
-    ["Skipped", s.skipped || 0],
-    ["Unmatched", s.unmatched || 0],
-  ]
-    .map(([lbl, num]) => `<div class="stat"><span class="num">${num}</span><span class="lbl">${lbl}</span></div>`)
-    .join("");
+  const statsGrid = $("stats-grid");
+  statsGrid.replaceChildren(
+    ...[
+      ["Updated", s.updated || 0],
+      ["Split", s.split || 0],
+      ["Skipped", s.skipped || 0],
+      ["Unmatched", s.unmatched || 0],
+    ].map(([lbl, num]) => {
+      const card = document.createElement("div");
+      card.className = "stat";
+      const numEl = document.createElement("span");
+      numEl.className = "num";
+      numEl.textContent = String(num);
+      const lblEl = document.createElement("span");
+      lblEl.className = "lbl";
+      lblEl.textContent = lbl;
+      card.append(numEl, lblEl);
+      return card;
+    })
+  );
 
   const list = $("changes-list");
   const changes = res.changes || [];
   if (!changes.length) {
-    list.innerHTML = `<li class="change-item muted">No new Amazon transactions needed updates.</li>`;
+    const empty = document.createElement("li");
+    empty.className = "change-item muted";
+    empty.textContent = "No new Amazon transactions needed updates.";
+    list.replaceChildren(empty);
     return;
   }
-  list.innerHTML = changes
-    .map((ch) => {
+  list.replaceChildren(
+    ...changes.map((ch) => {
       const catText = ch.splits
         ? "SPLIT: " + Object.entries(ch.splits).map(([k, v]) => `${k} $${v.toFixed(2)}`).join(", ")
         : ch.category || "Notes only";
-      return `<li class="change-item">
-        <div class="change-top">
-          <span>${ch.date} • $${Number(ch.amount).toFixed(2)}</span>
-          <span class="change-cat">${escapeHtml(catText)}</span>
-        </div>
-        <div class="change-note">${escapeHtml(ch.notes || "")}</div>
-      </li>`;
-    })
-    .join("");
-}
+      const li = document.createElement("li");
+      li.className = "change-item";
 
-function escapeHtml(str) {
-  return String(str).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+      const top = document.createElement("div");
+      top.className = "change-top";
+      const metaSpan = document.createElement("span");
+      metaSpan.textContent = `${ch.date} • $${Number(ch.amount).toFixed(2)}`;
+      const catSpan = document.createElement("span");
+      catSpan.className = "change-cat";
+      catSpan.textContent = catText;
+      top.append(metaSpan, catSpan);
+
+      const note = document.createElement("div");
+      note.className = "change-note";
+      note.textContent = ch.notes || "";
+
+      li.append(top, note);
+      return li;
+    })
+  );
 }
 
 async function refreshStatus() {

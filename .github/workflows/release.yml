@@ -1,0 +1,126 @@
+name: Release Extension
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.2); defaults to manifest version"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python deps and run unit tests
+        run: |
+          pip install -r requirements.txt
+          python -m unittest discover -s tests -v
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Validate extension JS & lint with web-ext
+        run: |
+          node --check extension/background.js
+          node --check extension/popup.js
+          npx --yes web-ext@8 lint --source-dir=extension
+
+      - name: Determine version tag
+        id: meta
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          elif [[ -n "${{ inputs.tag }}" ]]; then
+            TAG="${{ inputs.tag }}"
+          else
+            VER=$(python3 -c 'import json; print(json.load(open("extension/manifest.json"))["version"])')
+            TAG="v${VER}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Package Chrome zip
+        run: |
+          mkdir -p dist
+          python3 - <<'PY'
+          import os, zipfile
+          from pathlib import Path
+
+          tag = os.environ["TAG"]
+          ext = Path("extension")
+          with zipfile.ZipFile(f"dist/sure-retail-sync-extension-{tag}.zip", "w", zipfile.ZIP_DEFLATED) as zf:
+              for p in sorted(ext.rglob("*")):
+                  if p.is_file():
+                      zf.write(p, Path("sure-retail-sync-extension") / p.relative_to(ext))
+          PY
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+
+      - name: Sign Firefox XPI with Mozilla AMO (unlisted)
+        id: sign
+        if: ${{ secrets.AMO_JWT_ISSUER != '' && secrets.AMO_JWT_SECRET != '' }}
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          mkdir -p dist/signed
+          npx --yes web-ext@8 sign \
+            --channel=unlisted \
+            --source-dir=extension \
+            --artifacts-dir=dist/signed \
+            --api-key="$AMO_JWT_ISSUER" \
+            --api-secret="$AMO_JWT_SECRET"
+          XPI=$(ls dist/signed/*.xpi | head -n 1)
+          cp "$XPI" "dist/sure-retail-sync-firefox-signed-${TAG}.xpi"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Package unsigned Firefox XPI fallback
+        if: ${{ steps.sign.outputs.signed != 'true' }}
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          python3 - <<'PY'
+          import os, zipfile
+          from pathlib import Path
+
+          tag = os.environ["TAG"]
+          ext = Path("extension")
+          with zipfile.ZipFile(f"dist/sure-retail-sync-firefox-unsigned-{tag}.xpi", "w", zipfile.ZIP_DEFLATED) as zf:
+              for p in sorted(ext.rglob("*")):
+                  if p.is_file():
+                      zf.write(p, p.relative_to(ext))
+          PY
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          SIGNED: ${{ steps.sign.outputs.signed }}
+        run: |
+          if [[ "$SIGNED" == "true" ]]; then
+            NOTES=$(printf 'Automated release for **Sure Retail Sync %s**.\n\n- **Chrome / Brave / Edge:** Unzip `sure-retail-sync-extension-%s.zip` and load unpacked via `chrome://extensions`.\n- **Firefox:** Install `sure-retail-sync-firefox-signed-%s.xpi` permanently via `about:addons` -> gear icon -> **Install Add-on From File…**.' "$TAG" "$TAG" "$TAG")
+          else
+            NOTES=$(printf 'Automated release for **Sure Retail Sync %s**.\n\n- **Chrome / Brave / Edge:** Unzip `sure-retail-sync-extension-%s.zip` and load unpacked via `chrome://extensions`.\n- **Firefox:** `sure-retail-sync-firefox-unsigned-%s.xpi` is unsigned (add `AMO_JWT_ISSUER` and `AMO_JWT_SECRET` repo secrets to auto-sign on release).' "$TAG" "$TAG" "$TAG")
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.zip dist/*.xpi --clobber
+            gh release edit "$TAG" --notes "$NOTES"
+          else
+            gh release create "$TAG" dist/*.zip dist/*.xpi --title "$TAG" --notes "$NOTES"
+          fi

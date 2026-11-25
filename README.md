@@ -44,8 +44,9 @@ Expose port `8080` to your browser via your reverse proxy (Traefik/Caddy/Nginx) 
 3. Click **Load unpacked** and select the `extension/` (or unzipped) folder.
 
 ### Firefox (121+)
-- **Quick test (temporary):** Open `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on…** → select `manifest.json` inside the unzipped folder.
-- **Permanent install:** Regular Firefox Release requires signed `.xpi` files. Upload `sure-retail-sync-firefox-vX.Y.Z.xpi` from [Releases](https://github.com/abguymon/sure-retail-sync/releases) to [addons.mozilla.org](https://addons.mozilla.org/developers/) as a free **Self-distributed (unlisted)** add-on to receive a signed `.xpi`, or install unsigned on Firefox Developer Edition / Nightly / LibreWolf / Zen (`xpinstall.signatures.required = false`).
+- **Signed permanent install (recommended):** Download `sure-retail-sync-firefox-signed-vX.Y.Z.xpi` from [Releases](https://github.com/abguymon/sure-retail-sync/releases) → open `about:addons` → gear icon → **Install Add-on From File…**.
+- **Quick temporary test:** Open `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on…** → select `manifest.json` inside the unzipped folder.
+- **Self-signing via GitHub Actions:** Add `AMO_JWT_ISSUER` and `AMO_JWT_SECRET` (from [addons.mozilla.org/developers/addon/api/key](https://addons.mozilla.org/developers/addon/api/key/)) as repository secrets; pushing a `v*` tag automatically lints, signs an unlisted `.xpi` via `web-ext sign`, and attaches it to the GitHub Release.
 
 ### Configure the Extension
 1. Click the **Sure Retail Sync** toolbar icon → **Settings**, enter your server URL (e.g. `https://sure.example.com/sync`) and `SYNC_API_TOKEN`, and click **Save & Test Connection**.
