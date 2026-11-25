@@ -1,8 +1,48 @@
 const AMAZON_TX_URL = "https://www.amazon.com/cpe/yourpayments/transactions";
 const DAILY_ALARM = "sure-retail-sync-daily";
 const MAX_PAGES = 10;
+const FETCH_TIMEOUT_MS = 30000;
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+let activeController = null;
+
+const sleep = (ms, signal) =>
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new DOMException("Cancelled", "AbortError"));
+    const id = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(id);
+        reject(new DOMException("Cancelled", "AbortError"));
+      },
+      { once: true }
+    );
+  });
+
+async function fetchWithTimeout(url, options = {}, parentSignal = null) {
+  const controller = new AbortController();
+  const onParentAbort = () => controller.abort(parentSignal.reason || new DOMException("Cancelled", "AbortError"));
+  if (parentSignal) {
+    if (parentSignal.aborted) onParentAbort();
+    else parentSignal.addEventListener("abort", onParentAbort, { once: true });
+  }
+  const timer = setTimeout(() => controller.abort(new Error(`Request timed out after ${FETCH_TIMEOUT_MS / 1000}s`)), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err) {
+    if (controller.signal.aborted) {
+      const reason = controller.signal.reason;
+      if (reason instanceof Error) throw reason;
+      const e = new Error("Sync cancelled.");
+      e.name = "AbortError";
+      throw e;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    if (parentSignal) parentSignal.removeEventListener("abort", onParentAbort);
+  }
+}
 
 async function getSettings() {
   const data = await chrome.storage.local.get({
@@ -27,6 +67,23 @@ async function setProgress(inProgress, message, extra = {}) {
   });
 }
 
+async function getReconciledSyncState() {
+  const { syncState } = await chrome.storage.local.get({ syncState: null });
+  if (syncState?.inProgress && !activeController) {
+    const cleared = {
+      inProgress: false,
+      message: "Previous sync was interrupted. Ready to retry.",
+      error: null,
+      needsAmazonSignIn: false,
+      updatedAt: new Date().toISOString(),
+    };
+    await chrome.storage.local.set({ syncState: cleared });
+    await chrome.action.setBadgeText({ text: "" });
+    return cleared;
+  }
+  return syncState;
+}
+
 function looksLikeSignIn(url, html) {
   if ((url || "").includes("/ap/signin")) return true;
   if (!html) return false;
@@ -37,12 +94,16 @@ function looksLikeSignIn(url, html) {
   );
 }
 
-async function fetchAmazonText(url, options = {}) {
-  const resp = await fetch(url, {
-    credentials: "include",
-    redirect: "follow",
-    ...options,
-  });
+async function fetchAmazonText(url, options = {}, signal = null) {
+  const resp = await fetchWithTimeout(
+    url,
+    {
+      credentials: "include",
+      redirect: "follow",
+      ...options,
+    },
+    signal
+  );
   const text = await resp.text();
   if (looksLikeSignIn(resp.url, text)) {
     const err = new Error("Not signed in to Amazon. Sign in and try again.");
@@ -55,7 +116,7 @@ async function fetchAmazonText(url, options = {}) {
   return text;
 }
 
-async function callServer(settings, path, { method = "GET", body = null } = {}) {
+async function callServer(settings, path, { method = "GET", body = null, signal = null } = {}) {
   if (!settings.serverUrl || !settings.apiToken) {
     throw new Error("Configure your server URL and Sync API token in Settings first.");
   }
@@ -67,7 +128,7 @@ async function callServer(settings, path, { method = "GET", body = null } = {}) 
     headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
-  const resp = await fetch(`${settings.serverUrl}${path}`, opts);
+  const resp = await fetchWithTimeout(`${settings.serverUrl}${path}`, opts, signal);
   const text = await resp.text();
   let json;
   try {
@@ -82,6 +143,14 @@ async function callServer(settings, path, { method = "GET", body = null } = {}) 
 }
 
 async function runAmazonSync({ dryRun = false, days = null } = {}) {
+  if (activeController) {
+    throw new Error("A sync is already running. Click Cancel to stop it first.");
+  }
+
+  const controller = new AbortController();
+  activeController = controller;
+  const { signal } = controller;
+
   const settings = await getSettings();
   const lookback = Number(days || settings.days || 45);
 
@@ -90,10 +159,11 @@ async function runAmazonSync({ dryRun = false, days = null } = {}) {
   await setProgress(true, "Fetching Amazon Transactions page 1...");
 
   try {
-    const firstHtml = await fetchAmazonText(AMAZON_TX_URL);
+    const firstHtml = await fetchAmazonText(AMAZON_TX_URL, {}, signal);
     let plan = await callServer(settings, "/api/amazon/plan", {
       method: "POST",
       body: { transactions_html: [firstHtml], days: lookback },
+      signal,
     });
 
     const allCharges = [...(plan.charges || [])];
@@ -106,16 +176,20 @@ async function runAmazonSync({ dryRun = false, days = null } = {}) {
     while (nextPage && pageNum < MAX_PAGES) {
       pageNum += 1;
       await setProgress(true, `Fetching Amazon Transactions page ${pageNum}...`);
-      await sleep(800);
+      await sleep(800, signal);
 
       let pagePlan;
       if (nextPage.kind === "json") {
-        const resp = await fetch(nextPage.url, {
-          method: "POST",
-          credentials: "include",
-          headers: nextPage.headers,
-          body: JSON.stringify(nextPage.body),
-        });
+        const resp = await fetchWithTimeout(
+          nextPage.url,
+          {
+            method: "POST",
+            credentials: "include",
+            headers: nextPage.headers,
+            body: JSON.stringify(nextPage.body),
+          },
+          signal
+        );
         if (!resp.ok) break;
         const payload = await resp.json();
         pagePlan = await callServer(settings, "/api/amazon/plan", {
@@ -124,17 +198,23 @@ async function runAmazonSync({ dryRun = false, days = null } = {}) {
             transactions_json_pages: [{ payload, meta: nextPage.meta }],
             days: lookback,
           },
+          signal,
         });
       } else {
         const formBody = new URLSearchParams(nextPage.form_data).toString();
-        const html = await fetchAmazonText(nextPage.url, {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: formBody,
-        });
+        const html = await fetchAmazonText(
+          nextPage.url,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: formBody,
+          },
+          signal
+        );
         pagePlan = await callServer(settings, "/api/amazon/plan", {
           method: "POST",
           body: { transactions_html: [html], days: lookback },
+          signal,
         });
       }
 
@@ -152,12 +232,12 @@ async function runAmazonSync({ dryRun = false, days = null } = {}) {
         `Fetching order details (${i + 1}/${neededList.length}): ${orderNum}`
       );
       try {
-        ordersHtml[orderNum] = await fetchAmazonText(url);
+        ordersHtml[orderNum] = await fetchAmazonText(url, {}, signal);
       } catch (err) {
-        if (err.code === "AMAZON_SIGNIN_REQUIRED") throw err;
+        if (err.code === "AMAZON_SIGNIN_REQUIRED" || err.name === "AbortError") throw err;
         console.warn("Order fetch failed", orderNum, err);
       }
-      if (i + 1 < neededList.length) await sleep(1200);
+      if (i + 1 < neededList.length) await sleep(1200, signal);
     }
 
     await setProgress(
@@ -175,6 +255,7 @@ async function runAmazonSync({ dryRun = false, days = null } = {}) {
         days: lookback,
         dry_run: dryRun,
       },
+      signal,
     });
 
     const summary = {
@@ -195,15 +276,29 @@ async function runAmazonSync({ dryRun = false, days = null } = {}) {
     await chrome.action.setBadgeBackgroundColor({ color: "#16a34a" });
     return summary;
   } catch (err) {
+    const cancelled = err.name === "AbortError" && signal.aborted;
     const needsSignIn = err.code === "AMAZON_SIGNIN_REQUIRED";
-    await setProgress(false, err.message || String(err), {
-      error: err.message || String(err),
+    await setProgress(false, cancelled ? "Sync cancelled." : err.message || String(err), {
+      error: cancelled ? null : err.message || String(err),
       needsAmazonSignIn: needsSignIn,
     });
-    await chrome.action.setBadgeText({ text: needsSignIn ? "AUTH" : "ERR" });
-    await chrome.action.setBadgeBackgroundColor({ color: "#dc2626" });
+    await chrome.action.setBadgeText({ text: cancelled ? "" : needsSignIn ? "AUTH" : "ERR" });
+    if (!cancelled) await chrome.action.setBadgeBackgroundColor({ color: "#dc2626" });
     throw err;
+  } finally {
+    if (activeController === controller) {
+      activeController = null;
+    }
   }
+}
+
+async function cancelActiveSync() {
+  if (activeController) {
+    activeController.abort(new DOMException("Cancelled", "AbortError"));
+    activeController = null;
+  }
+  await setProgress(false, "Sync cancelled.", { error: null, needsAmazonSignIn: false });
+  await chrome.action.setBadgeText({ text: "" });
 }
 
 async function configureAlarm(enabled) {
@@ -219,6 +314,7 @@ async function configureAlarm(enabled) {
 chrome.runtime.onInstalled.addListener(async () => {
   const s = await getSettings();
   await configureAlarm(s.autoSync);
+  await getReconciledSyncState();
 });
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
@@ -235,6 +331,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     runAmazonSync({ dryRun: Boolean(msg.dryRun), days: msg.days })
       .then((res) => sendResponse({ ok: true, result: res }))
       .catch((err) => sendResponse({ ok: false, error: err.message, code: err.code }));
+    return true;
+  }
+  if (msg.type === "CANCEL_SYNC") {
+    cancelActiveSync()
+      .then(() => sendResponse({ ok: true }))
+      .catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+  if (msg.type === "GET_SYNC_STATE") {
+    getReconciledSyncState()
+      .then((syncState) => sendResponse({ ok: true, syncState }))
+      .catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;
   }
   if (msg.type === "TEST_STATUS") {

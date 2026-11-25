@@ -1,5 +1,8 @@
 const $ = (id) => document.getElementById(id);
 
+let cachedServerUrl = "";
+let hasAllHostPerms = false;
+
 function showTab(tab) {
   const isSync = tab === "sync";
   $("tab-sync").classList.toggle("active", isSync);
@@ -14,14 +17,39 @@ function setPill(text, kind) {
   el.className = `pill pill-${kind}`;
 }
 
+function requiredOrigins(serverUrl) {
+  const origins = ["https://www.amazon.com/*"];
+  if (serverUrl) {
+    try {
+      origins.push(new URL(serverUrl).origin + "/*");
+    } catch {
+      // Ignore malformed URL until saved
+    }
+  }
+  return origins;
+}
+
+async function checkHostPerms(serverUrl) {
+  try {
+    hasAllHostPerms = await chrome.permissions.contains({
+      origins: requiredOrigins(serverUrl),
+    });
+  } catch {
+    hasAllHostPerms = false;
+  }
+}
+
 function renderProgress(state) {
   const box = $("progress-box");
+  const textEl = $("progress-text");
+  const cancelBtn = $("btn-cancel");
   const signin = $("signin-box");
   const busy = Boolean(state?.inProgress);
   $("btn-sync").disabled = busy;
   $("btn-dry-run").disabled = busy;
 
   signin.classList.toggle("hidden", !state?.needsAmazonSignIn);
+  cancelBtn.classList.toggle("hidden", !busy);
 
   if (!state || (!state.inProgress && !state.error)) {
     box.classList.add("hidden");
@@ -29,7 +57,7 @@ function renderProgress(state) {
   }
   box.classList.remove("hidden", "banner-err", "banner-ok");
   if (state.error) box.classList.add("banner-err");
-  box.textContent = state.message || "";
+  textEl.textContent = state.message || "";
 }
 
 function renderResult(res) {
@@ -123,33 +151,49 @@ async function refreshStatus() {
 
 async function triggerSync(dryRun) {
   const days = Number($("days-select").value || 45);
-  await chrome.storage.local.set({ days });
 
-  // Firefox MV3 treats host_permissions as opt-in until granted in a user gesture.
-  try {
-    const { serverUrl } = await chrome.storage.local.get(["serverUrl"]);
-    const origins = ["https://www.amazon.com/*"];
-    if (serverUrl) {
-      origins.push(new URL(serverUrl).origin + "/*");
+  // Request host permissions synchronously inside the click gesture (before any
+  // other await) when not yet granted, as required by Firefox MV3.
+  if (!hasAllHostPerms) {
+    try {
+      const granted = await chrome.permissions.request({
+        origins: requiredOrigins(cachedServerUrl),
+      });
+      hasAllHostPerms = Boolean(granted);
+      if (granted === false) {
+        renderProgress({
+          inProgress: false,
+          error: "Host permission for Amazon and your sync server is required.",
+          message: "Host permission for Amazon and your sync server is required.",
+        });
+        return;
+      }
+    } catch {
+      // Continue; browser may already allow via manifest or refuse redundant prompt
     }
-    const granted = await chrome.permissions.request({ origins });
-    if (granted === false) {
+  }
+
+  await chrome.storage.local.set({ days });
+  renderProgress({ inProgress: true, message: "Starting sync..." });
+  chrome.runtime.sendMessage({ type: "RUN_SYNC", dryRun, days }, (resp) => {
+    if (chrome.runtime.lastError) {
       renderProgress({
         inProgress: false,
-        error: "Host permission for Amazon and your sync server is required.",
-        message: "Host permission for Amazon and your sync server is required.",
+        error: chrome.runtime.lastError.message,
+        message: chrome.runtime.lastError.message,
       });
       return;
     }
-  } catch {
-    // Ignore if browser handles permissions via manifest or already granted
-  }
-
-  renderProgress({ inProgress: true, message: "Starting sync..." });
-  chrome.runtime.sendMessage({ type: "RUN_SYNC", dryRun, days }, (resp) => {
     if (resp?.ok && resp.result) {
       renderResult(resp.result);
       refreshStatus();
+    } else if (resp && !resp.ok && resp.error) {
+      renderProgress({
+        inProgress: false,
+        error: resp.error,
+        message: resp.error,
+        needsAmazonSignIn: resp.code === "AMAZON_SIGNIN_REQUIRED",
+      });
     }
   });
 }
@@ -159,6 +203,11 @@ async function init() {
   $("tab-settings").addEventListener("click", () => showTab("settings"));
   $("btn-sync").addEventListener("click", () => triggerSync(false));
   $("btn-dry-run").addEventListener("click", () => triggerSync(true));
+  $("btn-cancel").addEventListener("click", () => {
+    chrome.runtime.sendMessage({ type: "CANCEL_SYNC" }, () => {
+      renderProgress({ inProgress: false, error: null, message: "" });
+    });
+  });
   $("btn-open-amazon").addEventListener("click", () => {
     chrome.tabs.create({ url: "https://www.amazon.com/cpe/yourpayments/transactions" });
   });
@@ -172,12 +221,22 @@ async function init() {
     lastResult: null,
   });
 
+  cachedServerUrl = stored.serverUrl;
+  await checkHostPerms(cachedServerUrl);
+
   $("input-url").value = stored.serverUrl;
   $("input-token").value = stored.apiToken;
   $("input-auto").checked = Boolean(stored.autoSync);
   $("days-select").value = String(stored.days || 45);
   renderProgress(stored.syncState);
   renderResult(stored.lastResult);
+
+  // Reconcile storage against live background worker so an interrupted run never stays stuck
+  chrome.runtime.sendMessage({ type: "GET_SYNC_STATE" }, (resp) => {
+    if (!chrome.runtime.lastError && resp?.ok) {
+      renderProgress(resp.syncState);
+    }
+  });
 
   if (!stored.serverUrl || !stored.apiToken) {
     showTab("settings");
@@ -198,9 +257,9 @@ async function init() {
     const apiToken = $("input-token").value.trim();
     const autoSync = $("input-auto").checked;
 
-    let origin;
+    let origins;
     try {
-      origin = new URL(rawUrl).origin + "/*";
+      origins = requiredOrigins(rawUrl);
     } catch {
       msg.className = "banner banner-err";
       msg.textContent = "Invalid server URL.";
@@ -208,11 +267,13 @@ async function init() {
     }
 
     try {
-      await chrome.permissions.request({ origins: [origin] });
+      const granted = await chrome.permissions.request({ origins });
+      hasAllHostPerms = Boolean(granted);
     } catch {
-      // Optional permission request can fail if already granted or restricted; continue to test
+      // Continue to test connection
     }
 
+    cachedServerUrl = rawUrl;
     await chrome.storage.local.set({ serverUrl: rawUrl, apiToken, autoSync });
     chrome.runtime.sendMessage({ type: "UPDATE_ALARM", enabled: autoSync });
 

@@ -33,7 +33,10 @@
       <button id="btn-sync" class="btn btn-primary" type="button">Sync Amazon</button>
     </div>
 
-    <div id="progress-box" class="banner hidden"></div>
+    <div id="progress-box" class="banner hidden">
+      <span id="progress-text"></span>
+      <button id="btn-cancel" class="btn btn-small hidden" type="button">Cancel</button>
+    </div>
     <div id="signin-box" class="banner banner-warn hidden">
       <span>Amazon session not signed in.</span>
       <button id="btn-open-amazon" class="btn btn-small" type="button">Sign in to Amazon</button>
@@ -61,7 +64,7 @@
       </label>
       <label class="checkbox-field">
         <input id="input-auto" type="checkbox" />
-        <span>Auto-sync once daily while Chrome is open</span>
+        <span>Auto-sync once daily while browser is open</span>
       </label>
       <button id="btn-save" class="btn btn-primary full" type="submit">Save &amp; Test Connection</button>
       <div id="settings-msg" class="banner hidden"></div>
