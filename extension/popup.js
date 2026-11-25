@@ -102,6 +102,27 @@ async function refreshStatus() {
 async function triggerSync(dryRun) {
   const days = Number($("days-select").value || 45);
   await chrome.storage.local.set({ days });
+
+  // Firefox MV3 treats host_permissions as opt-in until granted in a user gesture.
+  try {
+    const { serverUrl } = await chrome.storage.local.get(["serverUrl"]);
+    const origins = ["https://www.amazon.com/*"];
+    if (serverUrl) {
+      origins.push(new URL(serverUrl).origin + "/*");
+    }
+    const granted = await chrome.permissions.request({ origins });
+    if (granted === false) {
+      renderProgress({
+        inProgress: false,
+        error: "Host permission for Amazon and your sync server is required.",
+        message: "Host permission for Amazon and your sync server is required.",
+      });
+      return;
+    }
+  } catch {
+    // Ignore if browser handles permissions via manifest or already granted
+  }
+
   renderProgress({ inProgress: true, message: "Starting sync..." });
   chrome.runtime.sendMessage({ type: "RUN_SYNC", dryRun, days }, (resp) => {
     if (resp?.ok && resp.result) {

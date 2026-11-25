@@ -1,8 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Sure Retail Sync",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Itemize and categorize Amazon purchases in your self-hosted Sure Finance instance using your signed-in browser session.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "sure-retail-sync@abguymon.github.io",
+      "strict_min_version": "121.0"
+    }
+  },
   "permissions": [
     "storage",
     "alarms"
@@ -15,7 +21,8 @@
     "http://*/*"
   ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "scripts": ["background.js"]
   },
   "action": {
     "default_popup": "popup.html",

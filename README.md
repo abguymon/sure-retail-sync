@@ -36,13 +36,20 @@ docker compose -f docker-compose.example.yml up -d --build
 
 Expose port `8080` to your browser via your reverse proxy (Traefik/Caddy/Nginx) or Tailscale. All `/api/*` endpoints require `Authorization: Bearer <SYNC_API_TOKEN>`.
 
-## 2. Install the Chrome Extension
+## 2. Install the Browser Extension
 
-1. Open `chrome://extensions` in Chrome, Brave, or Edge.
-2. Enable **Developer mode** (top right).
-3. Click **Load unpacked** and select the `extension/` folder from this repo.
-4. Click the **Sure Retail Sync** toolbar icon → **Settings**, enter your server URL (e.g. `https://sure.example.com/sync`) and `SYNC_API_TOKEN`, and click **Save & Test Connection**.
-5. Click **Dry Run** to preview matches, then **Sync Amazon**!
+### Chrome, Brave, or Edge
+1. Download and unzip `sure-retail-sync-extension-vX.Y.Z.zip` from [Releases](https://github.com/abguymon/sure-retail-sync/releases) (or clone this repo).
+2. Open `chrome://extensions` and enable **Developer mode** (top right).
+3. Click **Load unpacked** and select the `extension/` (or unzipped) folder.
+
+### Firefox (121+)
+- **Quick test (temporary):** Open `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on…** → select `manifest.json` inside the unzipped folder.
+- **Permanent install:** Regular Firefox Release requires signed `.xpi` files. Upload `sure-retail-sync-firefox-vX.Y.Z.xpi` from [Releases](https://github.com/abguymon/sure-retail-sync/releases) to [addons.mozilla.org](https://addons.mozilla.org/developers/) as a free **Self-distributed (unlisted)** add-on to receive a signed `.xpi`, or install unsigned on Firefox Developer Edition / Nightly / LibreWolf / Zen (`xpinstall.signatures.required = false`).
+
+### Configure the Extension
+1. Click the **Sure Retail Sync** toolbar icon → **Settings**, enter your server URL (e.g. `https://sure.example.com/sync`) and `SYNC_API_TOKEN`, and click **Save & Test Connection**.
+2. Click **Dry Run** to preview matches, then **Sync Amazon**!
 
 ## API Endpoints
 
